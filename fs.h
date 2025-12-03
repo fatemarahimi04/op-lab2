@@ -30,6 +30,19 @@ private:
     // size of a FAT entry is 2 bytes
     int16_t fat[BLOCK_SIZE/2];
 
+    private:
+    uint16_t current_dir = ROOT_BLOCK;
+
+    int load_fat();
+    int save_fat();
+    int read_dir(uint16_t block, dir_entry *entries);
+    int write_dir(uint16_t block, dir_entry *entries);
+
+    int find_free_block();
+    int find_free_dir_entry(dir_entry *entries);
+    int find_dir_entry_index(dir_entry *entries, const std::string &name);
+
+
 public:
     FS();
     ~FS();
