@@ -15,8 +15,7 @@ FS::~FS()
 }
 
 // formats the disk, i.e., creates an empty file system
-int
-FS::format()
+int FS::format()
 {
     int fat_entries = BLOCK_SIZE / 2;
 
@@ -40,8 +39,7 @@ FS::format()
 
 // create <filepath> creates a new file on the disk, the data content is
 // written on the following rows (ended with an empty row)
-int
-FS::create(std::string filepath)
+int FS::create(std::string filepath)
 {
     // 1. Läs katalogen
     dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
@@ -126,6 +124,7 @@ FS::create(std::string filepath)
 
     return 0;
 }
+
 
 
 // cat <filepath> reads the content of a file and prints it on the screen
