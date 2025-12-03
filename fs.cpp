@@ -1,7 +1,7 @@
 #include <iostream>
 #include "fs.h"
 #include <cstring>
-#include <algorithm>
+#include <string>
 
 
 FS::FS()
@@ -14,163 +14,229 @@ FS::~FS()
 
 }
 
-int FS::format()
+// formats the disk, i.e., creates an empty file system
+int
+FS::format()
 {
-    int fat_entries = BLOCK_SIZE / 2;
+    std::cout << "FS::format()\n";
 
-    for (int i = 0; i < fat_entries; i++)
+    for (int i = 0; i < BLOCK_SIZE / 2; i++) {
         fat[i] = FAT_FREE;
-
+    }
     fat[ROOT_BLOCK] = FAT_EOF;
-    fat[FAT_BLOCK] = FAT_EOF;
+    fat[FAT_BLOCK]  = FAT_EOF;
 
-    save_fat();
+    unsigned char fat_block[BLOCK_SIZE];
+    std::memcpy(fat_block, fat, BLOCK_SIZE);
+    disk.write(FAT_BLOCK, fat_block);
 
-    dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
-    std::memset(entries, 0, sizeof(entries));
-
-    write_dir(ROOT_BLOCK, entries);
-    current_dir = ROOT_BLOCK;
+    unsigned char dir_block[BLOCK_SIZE];
+    std::memset(dir_block, 0, BLOCK_SIZE);
+    disk.write(ROOT_BLOCK, dir_block);
 
     return 0;
 }
 
-
-int FS::create(std::string filepath)
+// create <filepath> creates a new file on the disk, the data content is
+// written on the following rows (ended with an empty row)
+int
+FS::create(std::string filepath)
 {
-    dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
-    read_dir(current_dir, entries);
+std::cout << "FS::create(" << filepath << ")\n";
 
-    if (find_dir_entry_index(entries, filepath) != -1)
+    if (filepath.find('/') != std::string::npos) {
         return -1;
+    }
 
+    unsigned char fat_block[BLOCK_SIZE];
+    if (disk.read(FAT_BLOCK, fat_block) == 0) {
+        std::memcpy(fat, fat_block, BLOCK_SIZE);
+    }
+
+    unsigned char dir_block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, dir_block) != 0) {
+        return -2;
+    }
+    dir_entry *entries = reinterpret_cast<dir_entry*>(dir_block);
+    int n = BLOCK_SIZE / sizeof(dir_entry);
+
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0' &&
+            filepath == entries[i].file_name) {
+            return -3;
+        }
+    }
+
+    int free_index = -1;
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] == '\0') {
+            free_index = i;
+            break;
+        }
+    }
+    if (free_index == -1) {
+        return -4;
+    }
+
+    std::cout << "Enter data. Empty line to end.\n";
     std::string data;
     std::string line;
-    while (true)
-    {
-        std::getline(std::cin, line);
-        if (line.empty())
+    while (true) {
+        if (!std::getline(std::cin, line)) {
             break;
+        }
+        if (line.empty()) {
+            break;
+        }
         data += line;
         data += '\n';
     }
 
-    int file_size = data.size();
+    uint32_t size = static_cast<uint32_t>(data.size());
+    uint16_t first_blk = 0;
 
-    int first_block = FAT_EOF;
-    if (file_size == 0)
-    {
-        first_block = FAT_EOF;
-    }
-    else
-    {
-        int pos = 0;
-        int prev_block = -1;
+    if (size > 0) {
+        const char *p = data.c_str();
+        uint32_t left = size;
+        int prev = -1;
 
-        while (pos < file_size)
-        {
-            int block = find_free_block();
-            if (block == -1)
-                return -2;
+        while (left > 0) {
+            int b = -1;
+            for (int i = 2; i < BLOCK_SIZE / 2; i++) {
+                if (fat[i] == FAT_FREE) {
+                    b = i;
+                    break;
+                }
+            }
+            if (b == -1) {
+                return -5;
+            }
 
-            if (first_block == FAT_EOF)
-                first_block = block;
+            if (first_blk == 0) {
+                first_blk = static_cast<uint16_t>(b);
+            }
+            if (prev != -1) {
+                fat[prev] = static_cast<int16_t>(b);
+            }
 
-            if (prev_block != -1)
-                fat[prev_block] = block;
+            unsigned char data_block[BLOCK_SIZE];
+            std::memset(data_block, 0, BLOCK_SIZE);
+            uint32_t to_copy = (left > BLOCK_SIZE) ? BLOCK_SIZE : left;
+            std::memcpy(data_block, p, to_copy);
+            disk.write(b, data_block);
 
-            prev_block = block;
-
-            uint8_t buffer[BLOCK_SIZE];
-            std::memset(buffer, 0, BLOCK_SIZE);
-
-            int chunk = std::min((int)BLOCK_SIZE, file_size - pos);
-            std::memcpy(buffer, data.data() + pos, chunk);
-            pos += chunk;
-
-            disk.write(block, buffer);
+            left -= to_copy;
+            p    += to_copy;
+            prev  = b;
         }
 
-        fat[prev_block] = FAT_EOF;
+        if (prev != -1) {
+            fat[prev] = FAT_EOF;
+        }
+
+        std::memcpy(fat_block, fat, BLOCK_SIZE);
+        disk.write(FAT_BLOCK, fat_block);
     }
 
-    save_fat();
-
-    int free_idx = find_free_dir_entry(entries);
-    if (free_idx == -1)
-        return -3;
-
-    dir_entry &e = entries[free_idx];
-
+    dir_entry &e = entries[free_index];
     std::memset(&e, 0, sizeof(dir_entry));
-    std::strncpy(e.file_name, filepath.c_str(), sizeof(e.file_name)-1);
-    e.size = file_size;
-    e.first_blk = (first_block == FAT_EOF ? FAT_EOF : first_block);
-    e.type = TYPE_FILE;
+    std::strncpy(e.file_name, filepath.c_str(), sizeof(e.file_name) - 1);
+    e.file_name[sizeof(e.file_name) - 1] = '\0';
+    e.size      = size;
+    e.first_blk = first_blk;
+    e.type      = TYPE_FILE;
     e.access_rights = READ | WRITE;
 
-    write_dir(current_dir, entries);
+    disk.write(ROOT_BLOCK, dir_block);
 
     return 0;
 }
 
-
-
-int FS::cat(std::string filepath)
+// cat <filepath> reads the content of a file and prints it on the screen
+int
+FS::cat(std::string filepath)
 {
-    dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
-    read_dir(current_dir, entries);
+    std::cout << "FS::cat(" << filepath << ")\n";
 
-    int idx = find_dir_entry_index(entries, filepath);
-    if (idx == -1)
+    unsigned char fat_block[BLOCK_SIZE];
+    if (disk.read(FAT_BLOCK, fat_block) == 0) {
+        std::memcpy(fat, fat_block, BLOCK_SIZE);
+    }
+
+    unsigned char dir_block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, dir_block) != 0) {
         return -1;
+    }
+    dir_entry *entries = reinterpret_cast<dir_entry*>(dir_block);
+    int n = BLOCK_SIZE / sizeof(dir_entry);
 
-    dir_entry &e = entries[idx];
-
-    if (e.type != TYPE_FILE)
+    int index = -1;
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0' &&
+            filepath == entries[i].file_name) {
+            index = i;
+            break;
+        }
+    }
+    if (index == -1) {
         return -2;
+    }
 
-    uint16_t block = e.first_blk;
-    int remaining = e.size;
+    dir_entry &e = entries[index];
+    if (e.type != TYPE_FILE) {
+        return -3;
+    }
+    if (e.size == 0) {
+        return 0;
+    }
 
-    while (block != FAT_EOF && remaining > 0)
-    {
-        uint8_t buffer[BLOCK_SIZE];
-        disk.read(block, buffer);
+    uint32_t left = e.size;
+    int block = e.first_blk;
+    unsigned char data_block[BLOCK_SIZE];
 
-        int to_print = std::min((int)BLOCK_SIZE, remaining);
-        std::cout.write((char*)buffer, to_print);
-
-        remaining -= to_print;
+    while (block != FAT_EOF && left > 0) {
+        if (disk.read(block, data_block) != 0) {
+            return -4;
+        }
+        uint32_t to_print = (left > BLOCK_SIZE) ? BLOCK_SIZE : left;
+        std::cout.write(reinterpret_cast<char*>(data_block), to_print);
+        left  -= to_print;
         block = fat[block];
     }
 
+    std::cout << std::endl;
     return 0;
+
 }
 
-
+// ls lists the content in the currect directory (files and sub-directories)
 int
 FS::ls()
 {
-    dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
-    read_dir(current_dir, entries);
+    std::cout << "FS::ls()\n";
 
-    std::cout << "name size\n";
+    unsigned char dir_block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, dir_block) != 0) {
+        return -1;
+    }
 
-    int max = BLOCK_SIZE / sizeof(dir_entry);
-    for (int i = 0; i < max; i++)
-    {
-        if (entries[i].file_name[0] == '\0')
-            continue;
+    dir_entry *entries = reinterpret_cast<dir_entry*>(dir_block);
+    int n = BLOCK_SIZE / sizeof(dir_entry);
 
-        std::cout << entries[i].file_name << " "
-                  << entries[i].size << "\n";
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0') {
+            std::cout << entries[i].file_name
+                      << " "
+                      << entries[i].size
+                      << "\n";
+        }
     }
 
     return 0;
 }
 
-
+// cp <sourcepath> <destpath> makes an exact copy of the file
+// <sourcepath> to a new file <destpath>
 int
 FS::cp(std::string sourcepath, std::string destpath)
 {
@@ -178,6 +244,8 @@ FS::cp(std::string sourcepath, std::string destpath)
     return 0;
 }
 
+// mv <sourcepath> <destpath> renames the file <sourcepath> to the name <destpath>,
+// or moves the file <sourcepath> to the directory <destpath> (if dest is a directory)
 int
 FS::mv(std::string sourcepath, std::string destpath)
 {
@@ -185,6 +253,7 @@ FS::mv(std::string sourcepath, std::string destpath)
     return 0;
 }
 
+// rm <filepath> removes / deletes the file <filepath>
 int
 FS::rm(std::string filepath)
 {
@@ -192,6 +261,8 @@ FS::rm(std::string filepath)
     return 0;
 }
 
+// append <filepath1> <filepath2> appends the contents of file <filepath1> to
+// the end of file <filepath2>. The file <filepath1> is unchanged.
 int
 FS::append(std::string filepath1, std::string filepath2)
 {
@@ -199,6 +270,8 @@ FS::append(std::string filepath1, std::string filepath2)
     return 0;
 }
 
+// mkdir <dirpath> creates a new sub-directory with the name <dirpath>
+// in the current directory
 int
 FS::mkdir(std::string dirpath)
 {
@@ -206,6 +279,7 @@ FS::mkdir(std::string dirpath)
     return 0;
 }
 
+// cd <dirpath> changes the current (working) directory to the directory named <dirpath>
 int
 FS::cd(std::string dirpath)
 {
@@ -213,6 +287,8 @@ FS::cd(std::string dirpath)
     return 0;
 }
 
+// pwd prints the full path, i.e., from the root directory, to the current
+// directory, including the currect directory name
 int
 FS::pwd()
 {
@@ -220,68 +296,11 @@ FS::pwd()
     return 0;
 }
 
+// chmod <accessrights> <filepath> changes the access rights for the
+// file <filepath> to <accessrights>.
 int
 FS::chmod(std::string accessrights, std::string filepath)
 {
     std::cout << "FS::chmod(" << accessrights << "," << filepath << ")\n";
     return 0;
 }
-
-int FS::load_fat()
-{
-    uint8_t buffer[BLOCK_SIZE];
-    disk.read(FAT_BLOCK, buffer);
-    std::memcpy(fat, buffer, BLOCK_SIZE);
-    return 0;
-}
-
-int FS::save_fat()
-{
-    uint8_t buffer[BLOCK_SIZE];
-    std::memcpy(buffer, fat, BLOCK_SIZE);
-    disk.write(FAT_BLOCK, buffer);
-    return 0;
-}
-
-int FS::read_dir(uint16_t block, dir_entry *entries)
-{
-    uint8_t buffer[BLOCK_SIZE];
-    disk.read(block, buffer);
-    std::memcpy(entries, buffer, BLOCK_SIZE);
-    return 0;
-}
-
-int FS::write_dir(uint16_t block, dir_entry *entries)
-{
-    uint8_t buffer[BLOCK_SIZE];
-    std::memcpy(buffer, entries, BLOCK_SIZE);
-    disk.write(block, buffer);
-    return 0;
-}
-
-int FS::find_free_block()
-{
-    for (int i = 0; i < BLOCK_SIZE/2; i++)
-        if (fat[i] == FAT_FREE)
-            return i;
-    return -1;
-}
-
-int FS::find_free_dir_entry(dir_entry *entries)
-{
-    int max = BLOCK_SIZE / sizeof(dir_entry);
-    for (int i = 0; i < max; i++)
-        if (entries[i].file_name[0] == '\0')
-            return i;
-    return -1;
-}
-
-int FS::find_dir_entry_index(dir_entry *entries, const std::string &name)
-{
-    int max = BLOCK_SIZE / sizeof(dir_entry);
-    for (int i = 0; i < max; i++)
-        if (name == entries[i].file_name)
-            return i;
-    return -1;
-}
-
