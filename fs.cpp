@@ -14,7 +14,6 @@ FS::~FS()
 
 }
 
-// formats the disk, i.e., creates an empty file system
 int FS::format()
 {
     int fat_entries = BLOCK_SIZE / 2;
@@ -37,19 +36,14 @@ int FS::format()
 }
 
 
-// create <filepath> creates a new file on the disk, the data content is
-// written on the following rows (ended with an empty row)
 int FS::create(std::string filepath)
 {
-    // 1. Läs katalogen
     dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
     read_dir(current_dir, entries);
 
-    // 2. Kolla om filen redan finns
     if (find_dir_entry_index(entries, filepath) != -1)
-        return -1;  // fil finns redan
+        return -1;
 
-    // 3. Läs in data från användaren
     std::string data;
     std::string line;
     while (true)
@@ -63,7 +57,6 @@ int FS::create(std::string filepath)
 
     int file_size = data.size();
 
-    // 4. Fall: tom fil
     int first_block = FAT_EOF;
     if (file_size == 0)
     {
@@ -71,7 +64,6 @@ int FS::create(std::string filepath)
     }
     else
     {
-        // 5. Dela upp i block och skriv
         int pos = 0;
         int prev_block = -1;
 
@@ -79,7 +71,7 @@ int FS::create(std::string filepath)
         {
             int block = find_free_block();
             if (block == -1)
-                return -2; // slut på disk
+                return -2;
 
             if (first_block == FAT_EOF)
                 first_block = block;
@@ -102,13 +94,11 @@ int FS::create(std::string filepath)
         fat[prev_block] = FAT_EOF;
     }
 
-    // 6. Spara FAT
     save_fat();
 
-    // 7. Skapa katalogpost
     int free_idx = find_free_dir_entry(entries);
     if (free_idx == -1)
-        return -3; // katalogen full
+        return -3;
 
     dir_entry &e = entries[free_idx];
 
@@ -117,9 +107,8 @@ int FS::create(std::string filepath)
     e.size = file_size;
     e.first_blk = (first_block == FAT_EOF ? FAT_EOF : first_block);
     e.type = TYPE_FILE;
-    e.access_rights = READ | WRITE; // rw-
+    e.access_rights = READ | WRITE;
 
-    // 8. Skriv katalogen till disk
     write_dir(current_dir, entries);
 
     return 0;
@@ -127,24 +116,20 @@ int FS::create(std::string filepath)
 
 
 
-// cat <filepath> reads the content of a file and prints it on the screen
 int FS::cat(std::string filepath)
 {
-    // 1. Läs katalogen
     dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
     read_dir(current_dir, entries);
 
-    // 2. Hitta filen
     int idx = find_dir_entry_index(entries, filepath);
     if (idx == -1)
-        return -1; // filen finns inte
+        return -1;
 
     dir_entry &e = entries[idx];
 
     if (e.type != TYPE_FILE)
-        return -2; // är en directory
+        return -2;
 
-    // 3. Läs blocken i FAT-kedjan
     uint16_t block = e.first_blk;
     int remaining = e.size;
 
@@ -164,7 +149,6 @@ int FS::cat(std::string filepath)
 }
 
 
-// ls lists the content in the currect directory (files and sub-directories)
 int
 FS::ls()
 {
@@ -187,8 +171,6 @@ FS::ls()
 }
 
 
-// cp <sourcepath> <destpath> makes an exact copy of the file
-// <sourcepath> to a new file <destpath>
 int
 FS::cp(std::string sourcepath, std::string destpath)
 {
@@ -196,8 +178,6 @@ FS::cp(std::string sourcepath, std::string destpath)
     return 0;
 }
 
-// mv <sourcepath> <destpath> renames the file <sourcepath> to the name <destpath>,
-// or moves the file <sourcepath> to the directory <destpath> (if dest is a directory)
 int
 FS::mv(std::string sourcepath, std::string destpath)
 {
@@ -205,7 +185,6 @@ FS::mv(std::string sourcepath, std::string destpath)
     return 0;
 }
 
-// rm <filepath> removes / deletes the file <filepath>
 int
 FS::rm(std::string filepath)
 {
@@ -213,8 +192,6 @@ FS::rm(std::string filepath)
     return 0;
 }
 
-// append <filepath1> <filepath2> appends the contents of file <filepath1> to
-// the end of file <filepath2>. The file <filepath1> is unchanged.
 int
 FS::append(std::string filepath1, std::string filepath2)
 {
@@ -222,8 +199,6 @@ FS::append(std::string filepath1, std::string filepath2)
     return 0;
 }
 
-// mkdir <dirpath> creates a new sub-directory with the name <dirpath>
-// in the current directory
 int
 FS::mkdir(std::string dirpath)
 {
@@ -231,7 +206,6 @@ FS::mkdir(std::string dirpath)
     return 0;
 }
 
-// cd <dirpath> changes the current (working) directory to the directory named <dirpath>
 int
 FS::cd(std::string dirpath)
 {
@@ -239,8 +213,6 @@ FS::cd(std::string dirpath)
     return 0;
 }
 
-// pwd prints the full path, i.e., from the root directory, to the current
-// directory, including the currect directory name
 int
 FS::pwd()
 {
@@ -248,8 +220,6 @@ FS::pwd()
     return 0;
 }
 
-// chmod <accessrights> <filepath> changes the access rights for the
-// file <filepath> to <accessrights>.
 int
 FS::chmod(std::string accessrights, std::string filepath)
 {
