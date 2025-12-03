@@ -241,6 +241,89 @@ int
 FS::cp(std::string sourcepath, std::string destpath)
 {
     std::cout << "FS::cp(" << sourcepath << "," << destpath << ")\n";
+
+    unsigned char fat_block[BLOCK_SIZE];
+    if (disk.read(FAT_BLOCK, fat_block) == 0) {
+        std::memcpy(fat, fat_block, BLOCK_SIZE);
+    }
+
+    unsigned char dir_block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, dir_block) != 0) {
+        return -1;
+    }
+
+    dir_entry *entries = reinterpret_cast<dir_entry*>(dir_block);
+    int n = BLOCK_SIZE / sizeof(dir_entry);
+
+    int src_i = -1;
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0' && sourcepath == entries[i].file_name) {
+            src_i = i;
+            break;
+        }
+    }
+    if (src_i == -1) return -2;
+
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0' && destpath == entries[i].file_name) {
+            return -3;
+        }
+    }
+
+    int free_i = -1;
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] == '\0') {
+            free_i = i;
+            break;
+        }
+    }
+    if (free_i == -1) return -4;
+
+    dir_entry &src = entries[src_i];
+
+    uint32_t left = src.size;
+    int blk = src.first_blk;
+
+    uint16_t new_first = 0;
+    int prev = -1;
+
+    while (blk != FAT_EOF && left > 0) {
+        int nb = -1;
+        for (int i = 2; i < BLOCK_SIZE / 2; i++) {
+            if (fat[i] == FAT_FREE) {
+                nb = i;
+                break;
+            }
+        }
+        if (nb == -1) return -5;
+
+        unsigned char data_block[BLOCK_SIZE];
+        disk.read(blk, data_block);
+        disk.write(nb, data_block);
+
+        if (new_first == 0) new_first = nb;
+        if (prev != -1) fat[prev] = nb;
+
+        prev = nb;
+        blk = fat[blk];
+        left -= BLOCK_SIZE;
+    }
+
+    fat[prev] = FAT_EOF;
+
+    std::memcpy(fat_block, fat, BLOCK_SIZE);
+    disk.write(FAT_BLOCK, fat_block);
+
+    dir_entry &d = entries[free_i];
+    std::memset(&d, 0, sizeof(dir_entry));
+    std::strncpy(d.file_name, destpath.c_str(), sizeof(d.file_name)-1);
+    d.size = src.size;
+    d.first_blk = new_first;
+    d.type = TYPE_FILE;
+    d.access_rights = src.access_rights;
+
+    disk.write(ROOT_BLOCK, dir_block);
+
     return 0;
 }
 
@@ -250,6 +333,36 @@ int
 FS::mv(std::string sourcepath, std::string destpath)
 {
     std::cout << "FS::mv(" << sourcepath << "," << destpath << ")\n";
+
+    unsigned char dir_block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, dir_block) != 0) {
+        return -1;
+    }
+
+    dir_entry *entries = reinterpret_cast<dir_entry*>(dir_block);
+    int n = BLOCK_SIZE / sizeof(dir_entry);
+
+    int src_i = -1;
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0' && sourcepath == entries[i].file_name) {
+            src_i = i;
+            break;
+        }
+    }
+    if (src_i == -1) return -2;
+
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0' && destpath == entries[i].file_name) {
+            return -3;
+        }
+    }
+
+    dir_entry &e = entries[src_i];
+    std::memset(e.file_name, 0, sizeof(e.file_name));
+    std::strncpy(e.file_name, destpath.c_str(), sizeof(e.file_name)-1);
+
+    disk.write(ROOT_BLOCK, dir_block);
+
     return 0;
 }
 
@@ -258,6 +371,44 @@ int
 FS::rm(std::string filepath)
 {
     std::cout << "FS::rm(" << filepath << ")\n";
+
+    unsigned char fat_block[BLOCK_SIZE];
+    disk.read(FAT_BLOCK, fat_block);
+    std::memcpy(fat, fat_block, BLOCK_SIZE);
+
+    unsigned char dir_block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, dir_block) != 0) {
+        return -1;
+    }
+
+    dir_entry *entries = reinterpret_cast<dir_entry*>(dir_block);
+    int n = BLOCK_SIZE / sizeof(dir_entry);
+
+    int i = -1;
+    for (int k = 0; k < n; k++) {
+        if (entries[k].file_name[0] != '\0' &&
+            filepath == entries[k].file_name) {
+            i = k;
+            break;
+        }
+    }
+    if (i == -1) return -2;
+
+    dir_entry &e = entries[i];
+
+    int blk = e.first_blk;
+    while (blk != FAT_EOF && blk >= 0) {
+        int next = fat[blk];
+        fat[blk] = FAT_FREE;
+        blk = next;
+    }
+
+    std::memset(&e, 0, sizeof(dir_entry));
+
+    std::memcpy(fat_block, fat, BLOCK_SIZE);
+    disk.write(FAT_BLOCK, fat_block);
+    disk.write(ROOT_BLOCK, dir_block);
+
     return 0;
 }
 
@@ -267,6 +418,74 @@ int
 FS::append(std::string filepath1, std::string filepath2)
 {
     std::cout << "FS::append(" << filepath1 << "," << filepath2 << ")\n";
+
+    unsigned char fat_block[BLOCK_SIZE];
+    disk.read(FAT_BLOCK, fat_block);
+    std::memcpy(fat, fat_block, BLOCK_SIZE);
+
+    unsigned char dir_block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, dir_block) != 0) return -1;
+
+    dir_entry *entries = reinterpret_cast<dir_entry*>(dir_block);
+    int n = BLOCK_SIZE / sizeof(dir_entry);
+
+    int i1 = -1, i2 = -1;
+    for (int i = 0; i < n; i++) {
+        if (entries[i].file_name[0] != '\0' && filepath1 == entries[i].file_name)
+            i1 = i;
+        if (entries[i].file_name[0] != '\0' && filepath2 == entries[i].file_name)
+            i2 = i;
+    }
+    if (i1 == -1 || i2 == -1) return -2;
+
+    dir_entry &A = entries[i1];
+    dir_entry &B = entries[i2];
+
+    int end = B.first_blk;
+    if (end != 0) {
+        while (fat[end] != FAT_EOF) {
+            end = fat[end];
+        }
+    } else {
+        int nb = -1;
+        for (int j = 2; j < BLOCK_SIZE / 2; j++) {
+            if (fat[j] == FAT_FREE) { nb = j; break; }
+        }
+        if (nb == -1) return -3;
+        B.first_blk = nb;
+        fat[nb] = FAT_EOF;
+        end = nb;
+    }
+
+    uint32_t left = A.size;
+    int blk = A.first_blk;
+    unsigned char buf[BLOCK_SIZE];
+
+    while (blk != FAT_EOF && left > 0) {
+        disk.read(blk, buf);
+
+        int nb = -1;
+        for (int j = 2; j < BLOCK_SIZE / 2; j++) {
+            if (fat[j] == FAT_FREE) { nb = j; break; }
+        }
+        if (nb == -1) return -4;
+
+        disk.write(nb, buf);
+
+        fat[end] = nb;
+        end = nb;
+        fat[end] = FAT_EOF;
+
+        left -= BLOCK_SIZE;
+        blk = fat[blk];
+    }
+
+    B.size += A.size;
+
+    std::memcpy(fat_block, fat, BLOCK_SIZE);
+    disk.write(FAT_BLOCK, fat_block);
+    disk.write(ROOT_BLOCK, dir_block);
+
     return 0;
 }
 
